@@ -13,15 +13,15 @@ async def cmd_start(message: types.Message):
         reply_markup=main_kb
     )
 
-@router.message(Command("help"))
-@router.message(F.text == "ℹ️ Помощь")
-async def cmd_help(message: types.Message):
-    await message.answer(
-        "ℹ️ Доступные команды:\n"
-        "📂 Каталог — открыть список категорий\n"
-        "🛒 Корзина — посмотреть корзину\n"
-        "ℹ️ Помощь — показать справку"
-    )
+# @router.message(Command("help"))
+# @router.message(F.text == "ℹ️ Помощь")
+# async def cmd_help(message: types.Message):
+#     await message.answer(
+#         "ℹ️ Доступные команды:\n"
+#         "📂 Каталог — открыть список категорий\n"
+#         "🛒 Корзина — посмотреть корзину\n"
+#         "ℹ️ Помощь — показать справку"
+#     )
 
 @router.message(F.text == "📂 Каталог")
 async def open_catalog(message: types.Message):
