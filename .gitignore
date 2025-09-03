@@ -22,3 +22,4 @@ Thumbs.db
 
 # твои секретные файлы
 creds.json
+.env
