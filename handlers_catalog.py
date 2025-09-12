@@ -1,162 +1,189 @@
-# handlers_catalog.py
-from aiogram import Router, types
+from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pathlib import Path
-from aiogram.types import BufferedInputFile, InputMediaPhoto
-from sheets import get_products
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from collections import defaultdict
-import aiohttp
+from sheets import get_products
+import re
+import time
 
-NO_PHOTO_PATH = Path(__file__).parent / "static" / "no-photo.jpg"
+REFRESH_SECONDS = 600  # собираем каталог раз в 10 минут
+CAT_CACHE: dict = {"built_at": 0, "by_category": {}}
 
 router = Router()
 
-# Память: текущая страница по пользователю и корзина
-user_pages: dict[int, dict] = {}
-user_cart: dict[int, list] = {}
+# --- конфиг / константы ---
+MAX_TG_LEN = 4000  # чуть ниже 4096
 
-def group_by_category(products):
+# --- память ---
+user_cart: dict[int, list[dict]] = {}
+subcat_context: dict[int, list[dict]] = {}  # message_id -> товары этой подкатегории
+# кто из пользователей сейчас «добавляет» и к какому сообщению
+# user_id -> {"subcat": <message_id списка>, "prompt": <message_id промпта>}
+pending_add: dict[int, dict] = {}
+
+# --- отображение одной строки товара ---
+INLINE_ORDER = ["название", "бренд", "цвет", "сила", "описание", "цена"]
+
+def _build_catalog_views(products: list[dict]) -> dict[str, list[dict]]:
+    """Готовим тексты сообщений по категориям/подкатегориям заранее."""
+    by_cat: dict[str, list[dict]] = {}
+    cats = group_by_category(products)
+    for cat, items in cats.items():
+        groups = _group_by_subcategory(items)
+        views = []
+        for subcat, plist in groups.items():
+            # Сразу соберём текст подкатегории
+            lines = [f"{i}) {_format_item_one_line(p)}" for i, p in enumerate(plist, start=1)]
+            text = f"▶ {subcat}\n\n" + "\n".join(lines)
+            if len(text) > MAX_TG_LEN:
+                text = text[:MAX_TG_LEN - 1] + "…"
+            views.append({"subcat": subcat, "text": text, "plist": plist})
+        by_cat[cat] = views
+    return by_cat
+
+def ensure_catalog_warm(force: bool = False):
+    """Если кэш пустой или устарел — перечитать таблицу и собрать тексты."""
+    now = time.time()
+    if (not force) and CAT_CACHE["by_category"] and (now - CAT_CACHE["built_at"] < REFRESH_SECONDS):
+        return
+    products = get_products()  # тут уже есть внутренний TTL из sheets.py
+    CAT_CACHE["by_category"] = _build_catalog_views(products)
+    CAT_CACHE["built_at"] = now
+
+
+def _format_item_one_line(p: dict) -> str:
+    parts: list[str] = []
+    for key in INLINE_ORDER:
+        val = (p.get(key) or "").strip()
+        if val:
+            parts.append(val)
+    # добираем остальные поля, если есть
+    skip = set(INLINE_ORDER + ["фото", "категория", "бренд"])
+    for k, v in p.items():
+        v = (v or "").strip()
+        if v and k not in skip:
+            parts.append(v)
+    return " | ".join(parts)
+
+# --- группировки ---
+def group_by_category(products: list[dict]) -> dict[str, list[dict]]:
     grouped = defaultdict(list)
     for p in products:
         grouped[p.get("категория") or "Без категории"].append(p)
     return grouped
 
-# ---------- helpers ----------
-async def _download_image(url: str, timeout: int = 15) -> BufferedInputFile | None:
-    if not url:
-        return None
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=timeout, allow_redirects=True) as r:
-                if r.status != 200:
-                    return None
-                # иногда Drive отдаёт html — отфильтруем по типу
-                ctype = (r.headers.get("Content-Type") or "").lower()
-                data = await r.read()
-                head = data[:256].lower()
-                if ("image" not in ctype) and (b"<html" in head or b"<!doctype html" in head):
-                    return None
-        return BufferedInputFile(data, filename="photo.jpg")
-    except Exception:
-        return None
-# --------------------------------
+def _group_by_subcategory(items: list[dict]) -> dict[str, list[dict]]:
+    grouped = defaultdict(list)
+    for p in items:
+        grouped[p.get("подкатегория") or "Без подкатегории"].append(p)
+    return dict(sorted(grouped.items(), key=lambda kv: kv[0].lower()))
 
-@router.message(Command("catalog"))
-async def show_categories(message: types.Message):
-    products = get_products()
-    grouped = group_by_category(products)
+# --- меню каталога: сразу категории ---
+async def show_catalog_menu(message: types.Message):
+    ensure_catalog_warm()  # прогреем при открытии меню
+    cats = list(CAT_CACHE["by_category"].keys())
 
     kb = InlineKeyboardBuilder()
-    for cat in grouped.keys():
+    for cat in cats:
         kb.button(text=cat, callback_data=f"cat:{cat}")
     kb.adjust(2)
-
     await message.answer("📂 Выберите категорию:", reply_markup=kb.as_markup())
 
+
+# --- показать товары категории: подкатегории по одному сообщению ---
 @router.callback_query(lambda c: c.data.startswith("cat:"))
 async def show_products(callback: types.CallbackQuery):
-    await callback.answer()  # погасить крутилку
-    cat = callback.data.split(":", 1)[1]
+    await callback.answer()
+    _, value = callback.data.split(":", 1)
 
-    products = get_products()
-    grouped = group_by_category(products)
-    items = grouped.get(cat, [])
+    ensure_catalog_warm()  # на всякий случай
 
-    page = 0
-    user_pages[callback.from_user.id] = {"category": cat, "page": page}
-    await send_product_card(callback.message, items, cat, page)
+    views = CAT_CACHE["by_category"].get(value, [])
 
-def _build_card_text(p: dict) -> str:
-    return (
-        f"<b>{p.get('название','')}</b>\n\n"
-        f"📏 Кол-во: {p.get('кол-во','')}\n"
-        f"💪 Сила: {p.get('сила','')}\n"
-        f"📝 {p.get('описание','')}\n"
-        f"🏭 {p.get('бренд','')}\n"
-        f"📂 {p.get('категория','')}\n\n"
-        f"💵 <b>{p.get('цена','')}</b>\n"
+    # заголовок категории
+    try:
+        await callback.message.edit_text(f"📦 Категория: {value}")
+    except Exception:
+        await callback.message.answer(f"📦 Категория: {value}")
+
+    kb_one = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="➕ Добавить", callback_data="pick")]]
     )
 
-def _build_nav(cat: str, page: int, total: int) -> types.InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ В корзину", callback_data=f"add:{cat}:{page}")
-    if page > 0:
-        kb.button(text="⬅ Назад", callback_data=f"page:{cat}:{page-1}")
-    if page < total - 1:
-        kb.button(text="➡ Вперёд", callback_data=f"page:{cat}:{page+1}")
-    return kb.as_markup()
+    for v in views:
+        sent = await callback.message.answer(v["text"], reply_markup=kb_one)
+        subcat_context[sent.message_id] = v["plist"]  # контекст для «пикера»
 
-async def send_product_card(msg: types.Message, items: list[dict], cat: str, page: int):
-    if not items:
-        try:
-            await msg.edit_text("❌ В этой категории нет товаров.")
-        except Exception:
-            await msg.answer("❌ В этой категории нет товаров.")
-        return
+# --- парсинг "1, 3-5, 8" ---
+def _parse_indices(s: str) -> list[int]:
+    tokens = re.split(r"[,\s]+", (s or "").strip())
+    out: list[int] = []
+    for t in tokens:
+        if not t:
+            continue
+        if "-" in t:
+            a, b = t.split("-", 1)
+            if a.isdigit() and b.isdigit():
+                a, b = int(a), int(b)
+                lo, hi = (a, b) if a <= b else (b, a)
+                out.extend(range(lo, hi + 1))
+        elif t.isdigit():
+            out.append(int(t))
+    return sorted(set(out))
 
-    p = items[page]
-    text = _build_card_text(p)
-    markup = _build_nav(cat, page, len(items))
-
-    photo_url: str = p.get("фото") or ""
-
-    if photo_url:
-        f = await _download_image(photo_url)
-    else:
-        # берём локальную заглушку
-        f = BufferedInputFile(open(NO_PHOTO_PATH, "rb").read(), filename="no_photo.png")
-
-    if not f:
-        # если ничего не получилось — хотя бы текст покажем
-        try:
-            await msg.edit_text(text, reply_markup=markup, parse_mode="HTML")
-        except Exception:
-            await msg.answer(text, reply_markup=markup, parse_mode="HTML")
-        return
-
-    # пробуем заменить медиа
-    try:
-        await msg.edit_media(
-            media=InputMediaPhoto(media=f, caption=text, parse_mode="HTML"),
-            reply_markup=markup
-        )
-    except Exception:
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        await msg.answer_photo(f, caption=text, reply_markup=markup, parse_mode="HTML")
-
-
-@router.callback_query(lambda c: c.data.startswith("page:"))
-async def paginate(callback: types.CallbackQuery):
-    await callback.answer()  # погасить крутилку
-    _, cat, page = callback.data.split(":")
-    page = int(page)
-
-    products = get_products()
-    grouped = group_by_category(products)
-    items = grouped.get(cat, [])
-
-    user_pages[callback.from_user.id] = {"category": cat, "page": page}
-    await send_product_card(callback.message, items, cat, page)
-
-@router.callback_query(lambda c: c.data.startswith("add:"))
-async def add_to_cart(callback: types.CallbackQuery):
-    _, cat, page = callback.data.split(":")
-    page = int(page)
-
-    products = get_products()
-    grouped = group_by_category(products)
-    items = grouped.get(cat, [])
-    if not items:
-        await callback.answer("❌ Товар не найден", show_alert=True)
-        return
-
-    product = items[page]
+# --- старт добавления (нажата "➕ Добавить") ---
+@router.callback_query(F.data == "pick")
+async def start_pick(callback: types.CallbackQuery):
+    await callback.answer()
+    subcat_msg_id = callback.message.message_id
     user_id = callback.from_user.id
-    user_cart.setdefault(user_id, []).append(product)
 
-    # показываем тост
-    await callback.answer(f"✅ {product.get('название','Товар')} добавлен в корзину!", show_alert=False)
+    if subcat_msg_id not in subcat_context:
+        await callback.message.answer("Не удалось найти список этой подкатегории. Откройте категорию заново.")
+        return
+
+    # Просто текст без ForceReply — меню не пропадает
+    prompt = await callback.message.answer(
+        "Пришлите номера товаров из списка, например: 1, 3-5, 8"
+    )
+
+    pending_add[user_id] = {"subcat": subcat_msg_id, "prompt": prompt.message_id}
+
+# --- принять номера в ответ на ForceReply ---
+@router.message(F.text)
+async def pick_numbers(message: types.Message):
+    user_id = message.from_user.id
+    data = pending_add.get(user_id)
+    if not data:
+        return  # сейчас нет режима добавления
+
+    # если это реплай — проверим, что реплай на нужное сообщение
+    if message.reply_to_message:
+        reply_id = message.reply_to_message.message_id
+        if reply_id not in (data["prompt"], data["subcat"]):
+            return  # пользователь ответил не туда
+
+    plist = subcat_context.get(data["subcat"], [])
+    if not plist:
+        await message.answer("Список этой подкатегории устарел. Откройте категорию заново.")
+        pending_add.pop(user_id, None)
+        return
+
+    idxs = _parse_indices(message.text)
+    picked = []
+    for i in idxs:
+        j = i - 1
+        if 0 <= j < len(plist):
+            picked.append(plist[j])
+
+    if not picked:
+        await message.answer("Не разобрал номера. Пример: 1, 3-5, 8")
+        return
+
+    user_cart.setdefault(user_id, []).extend(picked)
+    pending_add.pop(user_id, None)
+
+    names = [p.get("название", "Товар") for p in picked][:5]
+    more = "" if len(picked) <= 5 else f" и ещё {len(picked) - 5}"
+    await message.answer(f"✅ Добавлено: {', '.join(names)}{more}.\nОткройте «🛒 Корзина» в меню.")
