@@ -2,7 +2,7 @@ import gspread
 import time
 import re
 
-gc = gspread.service_account(filename="creds.json")
+gc = gspread.service_account(filename="/configs/creds.json")
 
 # Кэш (5 минут по умолчанию)
 _cache = {"products": [], "last_update": 0}
