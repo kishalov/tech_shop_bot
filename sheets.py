@@ -1,26 +1,13 @@
 import gspread
 import time
 import re
-import os
-import json
-from google.oauth2.service_account import Credentials
 
-# --- Авторизация через переменную окружения ---
-creds_json = os.getenv("GOOGLE_CREDS")
-if not creds_json:
-    raise RuntimeError("Переменная окружения GOOGLE_CREDS не найдена")
-
-creds_dict = json.loads(creds_json)
-creds = Credentials.from_service_account_info(
-    creds_dict,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
-gc = gspread.authorize(creds)
+gc = gspread.service_account(filename="creds.json")
 
 # Кэш (5 минут по умолчанию)
 _cache = {"products": [], "last_update": 0}
 
-# Нормализация заголовков
+# Нормализация заголовков: "Название товара" -> "название", "IMAGE url" -> "фото", и т.п.
 HEADER_ALIASES = {
     "name": "название",
     "product": "название",
@@ -96,7 +83,7 @@ def get_products(
     sh = gc.open(sheet_name)
     ws = sh.worksheet(worksheet_name) if worksheet_name else sh.sheet1
 
-    rows = ws.get_all_values()
+    rows = ws.get_all_values()  # без типов, но нам ок
     if not rows:
         _cache.update({"products": [], "last_update": now})
         return []
@@ -106,7 +93,7 @@ def get_products(
     headers = []
     for h in headers_raw:
         key = _norm(h)
-        key = HEADER_ALIASES.get(key, key)
+        key = HEADER_ALIASES.get(key, key)  # маппим к нашим каноническим
         headers.append(key)
 
     products = []
@@ -126,8 +113,10 @@ def get_products(
             if k == "фото":
                 v = convert_drive_link(_first_url(v))
 
+             # ---- вот сюда добавим обработку цены ----
             if k == "цена" and v:
-                digits = re.sub(r"[^\d]", "", v)
+                import re
+                digits = re.sub(r"[^\d]", "", v)  # убрали всё кроме цифр
                 if digits:
                     try:
                         num = int(digits)
@@ -139,6 +128,7 @@ def get_products(
             item[k] = v
 
         if item.get("название"):
+            # категория по умолчанию
             item["категория"] = item.get("категория") or "Без категории"
             products.append(item)
 
