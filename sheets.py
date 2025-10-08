@@ -1,8 +1,16 @@
+import os
 import gspread
 import time
 import re
 
-gc = gspread.service_account(filename="/configs/creds.json")
+# --- универсальный путь до creds.json ---
+server_path = "/configs/creds.json"  # для хостинга (Linux)
+local_path = os.path.join(os.path.dirname(__file__), "configs", "creds.json")
+
+# выбираем путь, который существует
+creds_path = server_path if os.path.exists(server_path) else local_path
+
+gc = gspread.service_account(filename=creds_path)
 
 # Кэш (5 минут по умолчанию)
 _cache = {"products": [], "last_update": 0}
