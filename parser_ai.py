@@ -274,6 +274,55 @@ async def _safe_parse_line(lines: list[str], index: int, sem: asyncio.Semaphore)
 		"цена": price_norm or raw_price,
 	}
 
+def normalize_brands_and_subcats(items: list[dict]) -> list[dict]:
+	"""
+	Объединяет похожие бренды и выравнивает подкатегории внутри одного сообщения.
+	"""
+	from collections import defaultdict
+	if not items:
+		return items
+
+	# 1. Собираем статистику брендов и подкатегорий
+	brand_counts = defaultdict(int)
+	for it in items:
+		b = (it.get("категория") or "").strip().lower()
+		if b:
+			brand_counts[b] += 1
+
+	# 2. Определяем основной бренд (наиболее частый)
+	main_brand = max(brand_counts, key=brand_counts.get) if brand_counts else ""
+
+	# 3. Подравниваем бренды: все схожие варианты приводим к основному
+	for it in items:
+		brand = (it.get("категория") or "").strip()
+		if not brand or brand.lower() != main_brand:
+			it["категория"] = main_brand.capitalize()
+
+	# 4. Анализируем подкатегории
+	subcats_by_brand = defaultdict(set)
+	for it in items:
+		sub = (it.get("подкатегория") or "").strip()
+		if sub and sub.lower() not in {"", "без типа", "без подкатегории"}:
+			subcats_by_brand[it["категория"]].add(sub)
+
+	# 5. Если у бренда есть несколько разных серий (Kindle, PaperWhite, Scribe) — оставляем их.
+	#    Если серия одна — убираем подкатегорию вообще.
+	for it in items:
+		brand = it["категория"]
+		subs = subcats_by_brand.get(brand, set())
+		if len(subs) <= 1:
+			it["подкатегория"] = ""
+		else:
+			# если подкатегория пуста, попробуем вывести её из названия
+			sub = (it.get("подкатегория") or "").strip()
+			if not sub:
+				name = (it.get("название товара") or "").lower()
+				for s in subs:
+					if s.lower() in name:
+						it["подкатегория"] = s
+						break
+
+	return items
 
 async def parse_full_message(text: str) -> list[dict]:
 	"""
@@ -353,4 +402,6 @@ def simplify_subcategories(results: list[dict]) -> list[dict]:
 			for it in items:
 				it["подкатегория"] = ""
 
+	results = normalize_brands_and_subcats(results)
+	print(f"✅ После выравнивания брендов/подкатегорий: {len(results)}")
 	return results
