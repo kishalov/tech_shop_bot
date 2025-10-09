@@ -1,5 +1,7 @@
+openai
 telethon
 aiogram
 gspread
 oauth2client
 python-dotenv
+aiohttp
