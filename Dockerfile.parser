@@ -1,0 +1,18 @@
+# Используем тот же базовый образ, что и бот
+FROM python:3.11-slim
+
+# Рабочая директория
+WORKDIR /app
+
+# Копируем зависимости и ставим их
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем весь код
+COPY . .
+
+# Чтобы лог сразу шёл в stdout
+ENV PYTHONUNBUFFERED=1
+
+# Команда запуска парсера
+CMD ["python", "sync_channel.py"]
