@@ -51,18 +51,22 @@ def _group_by_subcategory(items: list[dict]) -> dict[str, list[dict]]:
 
 def _format_item_one_line(p: dict) -> str:
 	parts: list[str] = []
+	skip_keys = {"подкатегория", "категория", "бренд", "фото"}  # подкатегория теперь не выводится
 	for key in INLINE_ORDER:
+		if key in skip_keys:
+			continue
 		val = (p.get(key) or "").strip()
 		if val:
 			parts.append(val)
-	# добираем остальные поля, если есть
-	skip = set(INLINE_ORDER + ["фото", "категория", "бренд"])
+
+	# добираем остальные поля, если они не входят в список пропусков
+	skip = set(INLINE_ORDER) | skip_keys
 	for k, v in p.items():
 		v = (v or "").strip()
 		if v and k not in skip:
 			parts.append(v)
-	return " | ".join(parts)
 
+	return " | ".join(parts)
 
 def _build_catalog_views(products: list[dict]) -> dict[str, list[dict]]:
 	"""
