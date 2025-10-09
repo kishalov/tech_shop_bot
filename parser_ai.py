@@ -405,3 +405,93 @@ def simplify_subcategories(results: list[dict]) -> list[dict]:
 	results = normalize_brands_and_subcats(results)
 	print(f"✅ После выравнивания брендов/подкатегорий: {len(results)}")
 	return results
+
+def global_postprocess(all_items: list[dict]) -> list[dict]:
+	"""
+	Финальная глобальная нормализация после парсинга всех сообщений.
+	Анализирует всю таблицу целиком, исправляет:
+	  - расщеплённые бренды (например, "Rode", "rode", "RODE");
+	  - неверные/редкие бренды, если они не встречаются в названии;
+	  - пустые и 'Неизвестный бренд' — подставляет из аналогов по названию;
+	  - выравнивает подкатегории внутри брендов.
+	"""
+	from collections import defaultdict
+	import re
+
+	if not all_items:
+		return all_items
+
+	def _canon(s: str) -> str:
+		return re.sub(r"\s+", " ", (s or "").strip())
+
+	def _head(name: str, n=8) -> str:
+		return " ".join(re.findall(r"[A-Za-zА-Яа-я0-9\-]+", name)[:n]).lower()
+
+	# --- 1. Собираем частоты брендов ---
+	brand_counts = defaultdict(int)
+	for it in all_items:
+		b = _canon(it.get("категория", ""))
+		if b and "неизвест" not in b.lower():
+			brand_counts[b] += 1
+
+	if not brand_counts:
+		return all_items
+
+	main_brand = max(brand_counts, key=brand_counts.get)
+	canon_by_lower = {}
+	for b, c in brand_counts.items():
+		lw = b.lower()
+		if lw not in canon_by_lower or c > brand_counts[canon_by_lower[lw]]:
+			canon_by_lower[lw] = b
+
+	# --- 2. Исправляем пустые, редкие и «неизвестные» бренды ---
+	for it in all_items:
+		name_low = _head(it.get("название товара", ""))
+		brand = _canon(it.get("категория", ""))
+		lw = brand.lower()
+
+		# (a) Если пустой или "неизвестный" — ищем бренд в названии
+		if not brand or "неизвест" in lw:
+			for lwcanon, canon_name in canon_by_lower.items():
+				if re.search(rf"\b{re.escape(lwcanon)}\b", name_low):
+					it["категория"] = canon_name
+					break
+
+		# (b) Если бренд уникальный и не встречается в названии, а другой бренд встречается чаще
+		elif brand_counts[brand] == 1:
+			for lwcanon, canon_name in canon_by_lower.items():
+				if re.search(rf"\b{re.escape(lwcanon)}\b", name_low):
+					it["категория"] = canon_name
+					break
+
+	# --- 3. Приводим все варианты написания к единому виду ---
+	for it in all_items:
+		b = _canon(it.get("категория", ""))
+		if not b:
+			continue
+		lw = b.lower()
+		if lw in canon_by_lower:
+			it["категория"] = canon_by_lower[lw]
+
+	# --- 4. Обновляем подкатегории ---
+	subs_by_brand = defaultdict(set)
+	for it in all_items:
+		brand = _canon(it.get("категория", ""))
+		sub = _canon(it.get("подкатегория", ""))
+		if sub and sub.lower() not in {"", "без подкатегории", "без типа"}:
+			subs_by_brand[brand].add(sub)
+
+	for it in all_items:
+		brand = _canon(it.get("категория", ""))
+		subs = subs_by_brand.get(brand, set())
+		if len(subs) <= 1:
+			it["подкатегория"] = ""
+		else:
+			if not _canon(it.get("подкатегория", "")):
+				name_low = (it.get("название товара") or "").lower()
+				for s in subs:
+					if s.lower() in name_low:
+						it["подкатегория"] = s
+						break
+
+	return all_items

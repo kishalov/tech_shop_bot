@@ -2,7 +2,7 @@ import os
 import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from parser_ai import parse_full_message
+from parser_ai import parse_full_message, global_postprocess
 import gspread
 
 load_dotenv()
@@ -100,11 +100,31 @@ async def main():
 	all_rows = sheet.get_all_values()
 	name_col_norm = [h.strip().lower() for h in headers].index("название товара")
 
+	all_items = []  # ⬅️ собираем все товары сюда
+
 	async for message in client.iter_messages(source_channel, limit=None, reverse=True):
-		await process_message(message, headers, all_rows, name_col_norm)
+		text = message.message
+		if not text or len(text) < 20:
+			continue
+
+		print(f"📩 Обрабатываю сообщение {message.id}...")
+		items = await parse_full_message(text)
+		if not items:
+			continue
+		all_items.extend(items)
+
+		await asyncio.sleep(0.5)
+
+	print(f"🔧 Запускаю глобальную нормализацию на {len(all_items)} товаров...")
+	all_items = global_postprocess(all_items)
+	print("✅ Глобальная нормализация завершена.")
+
+	for item in all_items:
+		row_buf, c1, c2 = _build_row_for_headers(item, headers)
+		sheet.append_row(row_buf, table_range=f"{_col_letter(c1)}1:{_col_letter(c2)}1")
+		await asyncio.sleep(0.5)
 
 	print("✅ Прогон завершён.")
-
 
 async def daily_job():
 	while True:
