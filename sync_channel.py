@@ -102,7 +102,7 @@ async def main():
 
 	all_items = []
 
-	# 1️⃣ Собираем товары
+	# 1️⃣ Собираем все товары
 	async for message in client.iter_messages(source_channel, limit=None, reverse=True):
 		text = message.message
 		if not text or len(text) < 20:
@@ -113,19 +113,38 @@ async def main():
 		if not items:
 			continue
 		all_items.extend(items)
-
 		await asyncio.sleep(0.5)
 
 	print(f"🔧 Запускаю глобальную нормализацию на {len(all_items)} товаров...")
 	all_items = global_postprocess(all_items)
 	print("✅ Глобальная нормализация завершена.")
 
-	# 2️⃣ Записываем товары в Google Sheets
+	# 2️⃣ Добавляем или обновляем строки в таблице
 	for item in all_items:
+		name = item.get("название товара", "").strip().lower()
+		if not name:
+			continue
+
 		row_buf, c1, c2 = _build_row_for_headers(item, headers)
-		sheet.append_row(row_buf, value_input_option="USER_ENTERED")
-		print(f"✅ Добавлено: {item['название товара']}")
-		await asyncio.sleep(0.4)
+
+		found_row = None
+		for i, r in enumerate(all_rows[1:], start=2):
+			val = r[name_col_norm].strip().lower() if len(r) > name_col_norm else ""
+			if val == name:
+				found_row = i
+				break
+
+		range_str = f"{_col_letter(c1)}{found_row or len(all_rows)+1}:{_col_letter(c2)}{found_row or len(all_rows)+1}"
+
+		if found_row:
+			sheet.update(range_str, [row_buf])
+			print(f"♻️ Обновлено: {item['название товара']}")
+		else:
+			sheet.append_row(row_buf, value_input_option="USER_ENTERED")
+			print(f"✅ Добавлено новое: {item['название товара']}")
+			all_rows = sheet.get_all_values()  # обновляем локальный кэш
+
+		await asyncio.sleep(0.5)
 
 	print("✅ Прогон завершён.")
 
