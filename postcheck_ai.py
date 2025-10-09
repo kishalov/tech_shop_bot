@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import re
 import gspread
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -25,8 +26,9 @@ POSTCHECK_PROMPT = """
 1. Исправь бренды (поле "категория"), чтобы они были единообразными и корректными.
 2. Если написано "Неизвестный бренд", попробуй определить бренд по названию.
 3. Не меняй ничего, кроме "категория" и "подкатегория".
-4. Верни JSON-список с теми же объектами, где исправлены только эти поля.
+4. Верни строго JSON-СПИСОК (array) с теми же объектами, где исправлены только эти поля.
 """
+
 
 async def check_batch(batch, attempt=1):
 	text = json.dumps(batch, ensure_ascii=False)
@@ -43,12 +45,28 @@ async def check_batch(batch, attempt=1):
 			),
 			timeout=LLM_TIMEOUT
 		)
-		reply = getattr(resp.choices[0].message, "content", "")
-		data = json.loads(reply)
-		if isinstance(data, list):
-			return data
-		else:
-			raise ValueError("Ответ не список")
+
+		reply = getattr(resp.choices[0].message, "content", "").strip()
+
+		# Попробуем разные варианты формата
+		try:
+			data = json.loads(reply)
+		except Exception:
+			m = re.search(r"\[.*\]", reply, re.S)
+			if m:
+				data = json.loads(m.group(0))
+			else:
+				raise ValueError("Не удалось найти JSON в ответе")
+
+		# Если ответ — словарь с ключами, где лежат объекты, преобразуем в список
+		if isinstance(data, dict):
+			data = [v for v in data.values() if isinstance(v, dict)]
+
+		if not isinstance(data, list):
+			raise ValueError(f"Ответ не список (тип {type(data)})")
+
+		return data
+
 	except Exception as e:
 		if attempt < 3:
 			print(f"⚠️ Ошибка при постпроверке (попытка {attempt}): {e}")
@@ -57,6 +75,7 @@ async def check_batch(batch, attempt=1):
 		else:
 			print(f"❌ Не удалось обработать пакет после 3 попыток: {e}")
 			return batch
+
 
 async def postcheck_table():
 	print("🧠 Запускаю постпроверку таблицы...")
@@ -82,6 +101,7 @@ async def postcheck_table():
 				print(f"⚠️ Ошибка обновления строки {row_idx}: {e}")
 
 	print(f"✅ Постпроверка завершена. Обновлено {changed} строк из {total}.")
+
 
 if __name__ == "__main__":
 	asyncio.run(postcheck_table())
