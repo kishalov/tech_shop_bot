@@ -11,7 +11,7 @@ load_dotenv()
 api_id = int(os.getenv("TELEGRAM_API_ID"))
 api_hash = os.getenv("TELEGRAM_API_HASH")
 source_channel = os.getenv("SOURCE_CHANNEL")
-google_creds = "configs/creds.json"
+google_creds = "/configs/creds.json"
 
 # --- Google Sheets ---
 gc = gspread.service_account(filename=google_creds)
