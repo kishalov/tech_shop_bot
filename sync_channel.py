@@ -100,8 +100,9 @@ async def main():
 	all_rows = sheet.get_all_values()
 	name_col_norm = [h.strip().lower() for h in headers].index("название товара")
 
-	all_items = []  # ⬅️ собираем все товары сюда
+	all_items = []
 
+	# 1️⃣ Собираем товары
 	async for message in client.iter_messages(source_channel, limit=None, reverse=True):
 		text = message.message
 		if not text or len(text) < 20:
@@ -119,10 +120,12 @@ async def main():
 	all_items = global_postprocess(all_items)
 	print("✅ Глобальная нормализация завершена.")
 
+	# 2️⃣ Записываем товары в Google Sheets
 	for item in all_items:
 		row_buf, c1, c2 = _build_row_for_headers(item, headers)
-		sheet.append_row(row_buf, table_range=f"{_col_letter(c1)}1:{_col_letter(c2)}1")
-		await asyncio.sleep(0.5)
+		sheet.append_row(row_buf, value_input_option="USER_ENTERED")
+		print(f"✅ Добавлено: {item['название товара']}")
+		await asyncio.sleep(0.4)
 
 	print("✅ Прогон завершён.")
 
