@@ -31,7 +31,7 @@ def _col_letter(n: int) -> str:
 
 def _build_row_for_headers(item: dict, headers: list[str]):
 	norm_headers = [h.strip().lower() for h in headers]
-	fields = ["название товара", "категория", "подкатегория", "цвет", "модель", "характеристики", "цена"]
+	fields = ["название товара", "категория", "характеристики", "цена"]
 	idx = {f: (norm_headers.index(f) if f in norm_headers else None) for f in fields}
 
 	if idx["название товара"] is None:
@@ -103,15 +103,17 @@ async def main():
 	async for message in client.iter_messages(source_channel, limit=None, reverse=True):
 		await process_message(message, headers, all_rows, name_col_norm)
 
-	print("✅ Прогон завершён.")
-	
-    # # 🧩 После завершения парсинга — запустить постпроверку брендов
-	# try:
-	# 	from postcheck_ai import postcheck_table
-	# 	print("🧠 Запускаю постпроверку таблицы...")
-	# 	await postcheck_table()
-	# except Exception as e:
-	# 	print(f"⚠️ Ошибка во время постпроверки: {e}")
+	print("✅ Парсинг завершён. Все данные добавлены в таблицу.")
+
+	# 🧩 Постпроверка категорий и брендов
+	try:
+		from postcheck_ai import postcheck_table
+		print("\n🧠 Запускаю постпроверку категорий...")
+		# Проверяем последние 300 строк — обычно достаточно, чтобы охватить свежие товары
+		await postcheck_table(limit_rows=300)
+		print("✅ Постпроверка успешно завершена.")
+	except Exception as e:
+		print(f"⚠️ Ошибка во время постпроверки: {e}")
 
 async def daily_job():
 	while True:
