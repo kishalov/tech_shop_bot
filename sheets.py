@@ -137,7 +137,7 @@ def get_products(
 
         if item.get("название"):
             # категория по умолчанию
-            item["категория"] = item.get("категория") or "Без категории"
+            item["категория"] = item.get("категория") or "Прочее"
             products.append(item)
 
     _cache["products"] = products
