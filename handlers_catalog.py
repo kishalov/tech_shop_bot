@@ -72,10 +72,19 @@ async def show_catalog_menu(message: types.Message):
 	ensure_catalog_warm()
 	cats = list(CAT_CACHE["by_category"].keys())
 
+	# 🔹 перемещаем "Прочее" в конец
+	cats_sorted = sorted(
+		[c for c in cats if c.lower() != "прочее"],
+		key=lambda x: x.lower()
+	)
+	if "Прочее" in cats:
+		cats_sorted.append("Прочее")
+
 	kb = InlineKeyboardBuilder()
-	for cat in cats:
+	for cat in cats_sorted:
 		kb.button(text=cat, callback_data=f"cat:{cat}")
 	kb.adjust(2)
+
 	await message.answer("📂 Выберите категорию:", reply_markup=kb.as_markup())
 
 # --- товары категории ---
