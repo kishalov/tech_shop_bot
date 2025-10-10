@@ -30,9 +30,8 @@ INLINE_ORDER = ["название", "бренд", "цвет", "сила", "оп�
 def group_by_category(products: list[dict]) -> dict[str, list[dict]]:
 	grouped = defaultdict(list)
 	for p in products:
-		grouped[p.get("категория") or "Без категории"].append(p)
+		grouped[p.get("категория") or "Прочее"].append(p)
 	return grouped
-
 
 def _group_by_subcategory(items: list[dict]) -> dict[str, list[dict]]:
 	"""
