@@ -33,35 +33,35 @@ SINGLE_LINE_SYSTEM_PROMPT = """
 ❗ Список допустимых категорий (используй ТОЛЬКО их, никаких других придумывать нельзя):
 
 📂 Категории:
-1. iPhone SE/11/12
+1. iPhone SE / 11 / 12
 2. iPhone 13
-3. iPhone 14/14 Pro
-4. iPhone 15/15 Pro
-5. iPhone 16e/16
+3. iPhone 14 / 14 Pro
+4. iPhone 15 / 15 Pro
+5. iPhone 16e / 16
 6. iPhone 16 Pro
-7. iPhone 17/Air
-8. iPhone 17 Pro/Pro Max
+7. iPhone 17 / Air
+8. iPhone 17 Pro / Pro Max
 9. iPad Air
 10. iPad Pro
-11. iPad/iPad mini
+11. iPad / iPad mini
 12. iMac
 13. MacBook Air
 14. MacBook Pro
 15. AirPods
 16. Apple Watch
-17. Яндекс/JBL
-18. PS 5/Xbox
-19. Huawei\Honor
-20. Pixel\One Plus
+17. Яндекс / JBL
+18. PS 5 / Xbox
+19. Huawei / Honor
+20. Pixel / One Plus
 21. Samsung
-22. Xiaomi\Poco
+22. Xiaomi / Poco
 23. Dyson
 24. DJi
 25. Смарт-часы
 26. Наушники
 27. Аксессуары
 28. Гаджеты
-29. Fix/Labubu
+29. Fix / Labubu
 
 Никакие новые категории добавлять нельзя — выбирай ближайшую по смыслу.
 
