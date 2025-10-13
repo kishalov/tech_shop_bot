@@ -70,7 +70,7 @@ def get_products(sheet_name: str = "Catalog", ttl: int = 300) -> list[dict]:
 				if digits:
 					try:
 						num = int(digits)
-						num = int(num * 1.15)
+						# num = int(num * 1.15)
 						v = f"{num:,} ₽".replace(",", " ")
 					except Exception:
 						pass
