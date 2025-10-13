@@ -1,5 +1,6 @@
 import re
 import time
+import html
 from collections import defaultdict
 from aiogram import Router, types, F
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -25,25 +26,17 @@ def group_by_category(products: list[dict]) -> dict[str, list[dict]]:
 
 # --- форматирование ---
 def _format_item_one_line(p: dict) -> str:
-	name = (p.get("название") or "").strip()
-	desc = (p.get("характеристики") or "").strip()
-	price = (p.get("цена") or "").strip()
+	name = html.escape((p.get("название") or "").strip())
+	desc = html.escape((p.get("характеристики") or "").strip())
+	price = html.escape((p.get("цена") or "").strip())
 
 	parts = []
-
-	# 🔹 Название — жирным
 	if name:
 		parts.append(f"<b>{name}</b>")
-
-	# 🔹 Характеристики — курсивом (если есть)
 	if desc:
 		parts.append(f"<i>{desc}</i>")
-
-	# 🔹 Цена — жирным + эмодзи 💰
 	if price:
 		parts.append(f"💰 <b>{price}</b>")
-
-	# Каждая строка как аккуратная карточка товара
 	return " — ".join(parts)
 
 # --- сборка вида ---

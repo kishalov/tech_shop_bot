@@ -49,8 +49,7 @@ def _build_row_for_headers(item: dict, headers: list[str]):
 	for key in fields:
 		put(key, item.get(key))
 
-	return row_buf, first + 1, last + 1
-
+	return row_buf, first + 1, last + 1, idx
 
 async def process_message(message, headers, all_rows, name_col_norm):
 	text = message.message
@@ -69,7 +68,7 @@ async def process_message(message, headers, all_rows, name_col_norm):
 			continue
 		unique_names.add(name)
 
-		row_buf, c1, c2 = _build_row_for_headers(item, headers)
+		row_buf, c1, c2, idx = _build_row_for_headers(item, headers)
 
 		# поиск строки по названию
 		found_row = None
@@ -82,15 +81,38 @@ async def process_message(message, headers, all_rows, name_col_norm):
 		range_str = f"{_col_letter(c1)}{found_row or len(all_rows)+1}:{_col_letter(c2)}{found_row or len(all_rows)+1}"
 
 		if found_row:
-			sheet.update(range_str, [row_buf])
-			print(f"♻️ Обновлено: {item['название товара']}")
+			existing_row = all_rows[found_row - 1]  # строка из таблицы
+			existing_price = ""
+			existing_cat = ""
+
+			if len(existing_row) > idx["цена"]:
+				existing_price = (existing_row[idx["цена"]] or "").strip()
+			if len(existing_row) > idx["категория"]:
+				existing_cat = (existing_row[idx["категория"]] or "").strip()
+
+			new_price = (item.get("цена") or "").strip()
+			new_cat = (item.get("категория") or "").strip()
+
+			# 🔹 Обновляем ТОЛЬКО если изменилась цена
+			if new_price and new_price != existing_price:
+				update_data = existing_row[:]  # копия текущей строки
+				if len(update_data) <= idx["цена"]:
+					update_data.extend([""] * (idx["цена"] - len(update_data) + 1))
+
+				update_data[idx["цена"]] = new_price
+				# категория остаётся как была
+				range_str = f"{_col_letter(c1)}{found_row}:{_col_letter(c2)}{found_row}"
+				sheet.update(range_str, [update_data[c1-1:c2]])
+				print(f"💰 Обновлена цена: {item['название товара']} ({existing_price} → {new_price})")
+			else:
+				print(f"⏩ Без изменений: {item['название товара']}")
+
 		else:
 			sheet.append_row(row_buf, table_range=f"{_col_letter(c1)}1:{_col_letter(c2)}1")
 			print(f"✅ Добавлено новое: {item['название товара']}")
 			all_rows.append([""] * len(headers))
 
-		await asyncio.sleep(0.5)  # не перегружаем API
-
+		await asyncio.sleep(0.5)
 
 async def main():
 	await client.start()
