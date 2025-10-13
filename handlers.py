@@ -3,7 +3,6 @@ from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from keyboards import main_kb
-from handlers_catalog import show_catalog_menu, user_cart, ensure_catalog_warm
 from handlers_catalog import (
 	show_catalog_menu,
 	user_cart,
@@ -11,6 +10,8 @@ from handlers_catalog import (
 	CAT_CACHE,
 	REFRESH_SECONDS
 )
+
+
 router = Router()
 MANAGER_CHAT_ID = -4874196441
 
