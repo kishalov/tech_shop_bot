@@ -3,6 +3,7 @@ from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from keyboards import main_kb
+import time
 from handlers_catalog import (
 	show_catalog_menu,
 	user_cart,
