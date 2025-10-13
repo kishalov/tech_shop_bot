@@ -21,7 +21,12 @@ pending_add: dict[int, dict] = {}
 def group_by_category(products: list[dict]) -> dict[str, list[dict]]:
 	grouped = defaultdict(list)
 	for p in products:
-		grouped[p.get("категория") or "Прочее"].append(p)
+		cat = (p.get("категория") or "").strip().capitalize()
+		# 🔹 Пропускаем товары без категории
+		if not cat:
+			continue
+		# 🔹 Добавляем только те, у кого категория реально указана
+		grouped[cat].append(p)
 	return grouped
 
 # --- форматирование ---
