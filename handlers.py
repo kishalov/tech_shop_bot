@@ -4,7 +4,13 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from keyboards import main_kb
 from handlers_catalog import show_catalog_menu, user_cart, ensure_catalog_warm
-
+from handlers_catalog import (
+	show_catalog_menu,
+	user_cart,
+	ensure_catalog_warm,
+	CAT_CACHE,
+	REFRESH_SECONDS
+)
 router = Router()
 MANAGER_CHAT_ID = -4874196441
 
@@ -56,6 +62,18 @@ async def manual_refresh(message: types.Message):
 
 @router.message(F.text == "📂 Меню")
 async def open_catalog(message: types.Message):
+	now = time.time()
+	# если каталог старее 5 минут — показываем "загрузка"
+	if now - CAT_CACHE["built_at"] > REFRESH_SECONDS:
+		loading_msg = await message.answer("⏳ Загружаем каталог...")
+		ensure_catalog_warm(force=True)
+		try:
+			await loading_msg.delete()
+		except Exception:
+			pass
+	else:
+		ensure_catalog_warm()
+	
 	await show_catalog_menu(message)
 
 @router.message(F.text == "🛒 Корзина")
