@@ -39,10 +39,8 @@ def _col_letter(n: int) -> str:
 def make_item_key(item: dict) -> str:
 	name = (item.get("название товара") or "").strip().lower()
 	char = (item.get("характеристики") or "").strip().lower()
-	price = (item.get("цена") or "").strip()
-	base = f"{name}:{char}:{price}"
+	base = f"{name}:{char}"
 	return hashlib.md5(base.encode("utf-8")).hexdigest()[:12]
-
 
 def similar(a: str, b: str) -> float:
 	return SequenceMatcher(None, a, b).ratio()
@@ -90,7 +88,7 @@ def _build_row_for_headers(item: dict, headers: list[str]):
 
 # ---------- ГЛАВНАЯ ЛОГИКА ----------
 
-async def process_message(message, headers, all_rows, name_col_norm, key_col_norm, known_keys: set):
+async def process_message(message, headers, all_rows, name_col_norm, key_col_norm):
 	text = message.message
 	if not text or len(text) < 20:
 		return
@@ -100,10 +98,16 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 	if not items:
 		return
 
-	# Буферы для пакетного обновления
-	new_rows = []       # список строк для добавления
-	price_updates = []  # список кортежей (row_index, c1, c2, data)
-	batch_limit = 100   # сколько максимум операций в одном batch_update
+	# Собираем известные ключи из таблицы
+	existing_keys = set(
+		r[key_col_norm].strip()
+		for r in all_rows[1:]
+		if len(r) > key_col_norm and r[key_col_norm].strip()
+	)
+
+	new_rows = []
+	price_updates = []
+	batch_limit = 100
 
 	for item in items:
 		name = (item.get("название товара") or "").strip().lower()
@@ -114,11 +118,11 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 		item["key"] = item_key
 
 		# --- Проверка по ключу ---
-		if item_key in known_keys:
+		if item_key in existing_keys:
 			print(f"⏩ Уже добавлен: {item['название товара']}")
 			continue
 
-		# --- Проверка похожих названий ---
+		# --- Проверка похожих названий (на всякий случай) ---
 		is_duplicate = False
 		for r in all_rows[1:]:
 			if len(r) > name_col_norm:
@@ -132,7 +136,7 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 
 		row_buf, c1, c2, idx = _build_row_for_headers(item, headers)
 
-		# --- Проверка существующей строки по ключу (на случай обновления цены) ---
+		# --- Проверка существующей строки по ключу (для обновления цены) ---
 		found_row = None
 		for i, r in enumerate(all_rows[1:], start=2):
 			if key_col_norm is not None and len(r) > key_col_norm:
@@ -156,21 +160,16 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 		else:
 			new_rows.append(row_buf)
 			all_rows.append([""] * len(headers))
-			known_keys.add(item_key)
-			save_known(known_keys)
+			existing_keys.add(item_key)
 			print(f"✅ Добавлено новое: {item['название товара']}")
 
 	# --- Пакетное добавление новых товаров ---
 	if new_rows:
 		print(f"📦 Добавляю новые строки: {len(new_rows)} шт...")
 		try:
-			# Определяем диапазон для добавления (следующая строка после последней)
 			start_row = len(all_rows) - len(new_rows) + 1
 			range_str = f"{_col_letter(1)}{start_row}:{_col_letter(len(headers))}{start_row + len(new_rows) - 1}"
-			sheet.batch_update([{
-				"range": range_str,
-				"values": new_rows
-			}])
+			sheet.batch_update([{"range": range_str, "values": new_rows}])
 			print("✅ Новые строки успешно добавлены.")
 		except Exception as e:
 			print(f"⚠️ Ошибка при добавлении строк: {e}")
@@ -183,12 +182,11 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 			range_str = f"{_col_letter(c1)}{row}:{_col_letter(c2)}{row}"
 			batch_data.append({"range": range_str, "values": [vals]})
 
-		# разбиваем на части, если слишком много обновлений
 		for i in range(0, len(batch_data), batch_limit):
 			chunk = batch_data[i:i + batch_limit]
 			try:
 				sheet.batch_update(chunk)
-				await asyncio.sleep(2)  # пауза между пакетами
+				await asyncio.sleep(2)
 			except Exception as e:
 				print(f"⚠️ Ошибка при batch_update: {e}")
 
@@ -200,8 +198,9 @@ async def main():
 
 	headers = sheet.row_values(1)
 
-	# --- если столбца key нет — добавляем ---
+	# --- Добавляем столбец 'key' при необходимости ---
 	if "key" not in [h.strip().lower() for h in headers]:
+		sheet.add_cols(1)
 		sheet.update_cell(1, len(headers) + 1, "key")
 		headers.append("key")
 		print("🆕 Добавлен столбец 'key' в таблицу.")
@@ -211,14 +210,12 @@ async def main():
 	name_col_norm = norm_headers.index("название товара")
 	key_col_norm = norm_headers.index("key")
 
-	known_keys = load_known()
-	print(f"📚 Загружено известных ключей: {len(known_keys)}")
+	print(f"📚 Загружено строк из таблицы: {len(all_rows) - 1}")
 
 	async for message in client.iter_messages(source_channel, limit=None, reverse=True):
-		await process_message(message, headers, all_rows, name_col_norm, key_col_norm, known_keys)
+		await process_message(message, headers, all_rows, name_col_norm, key_col_norm)
 
 	print("✅ Парсинг завершён. Все данные добавлены в таблицу.")
-
 
 async def weekly_job():
 	while True:
