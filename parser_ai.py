@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+import hashlib
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
@@ -23,6 +24,12 @@ PRICE_RE = re.compile(
 	re.IGNORECASE
 )
 EMOJI_RE = re.compile(r'[\U00010000-\U0010ffff]', flags=re.UNICODE)
+
+# --- Функция для стабильного хэша исходной строки ---
+def make_source_key(source_text: str) -> str:
+	text = source_text.strip().lower()
+	text = re.sub(r"\s+", " ", text)
+	return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
 
 # Системный промпт: ОДНА строка → ОДИН объект
 SINGLE_LINE_SYSTEM_PROMPT = """
@@ -92,40 +99,32 @@ SINGLE_LINE_SYSTEM_PROMPT = """
 
 # ------------------ ПОМОЩНИКИ ------------------
 
-def _stitch_candidates(full_text: str) -> list[str]:
-    """
-    Собираем КАНДИДАТ-СТРОКИ: читаем ВСЁ сообщение и формируем строки,
-    в которых встречается цена. Чтобы не потерять товары, у которых
-    название и цена разнесены по соседним строкам, пытаемся склеить 1-2
-    последующие строки, если первая без цены, а следующая содержит цену.
-    """
-    raw_lines = [EMOJI_RE.sub("", l).strip() for l in full_text.splitlines()]
-    raw_lines = [l for l in raw_lines if l]  # убираем пустые
+def _stitch_candidates(full_text: str) -> list[tuple[str, str]]:
+	raw_lines = [EMOJI_RE.sub("", l).strip() for l in full_text.splitlines()]
+	raw_lines = [l for l in raw_lines if l]
 
-    candidates = []
-    i = 0
-    n = len(raw_lines)
-    while i < n:
-        line = raw_lines[i]
-        if PRICE_RE.search(line):
-            candidates.append(line)
-            i += 1
-            continue
+	candidates = []
+	i = 0
+	while i < len(raw_lines):
+		line = raw_lines[i]
+		if PRICE_RE.search(line):
+			candidates.append((line, make_source_key(line)))
+			i += 1
+			continue
 
-        # Пытаемся склеить с 1–2 следующими строками, если там появится цена
-        made = False
-        for span in (1, 2):
-            if i + span < n:
-                combo = " ".join(raw_lines[i:i+span+1])
-                if PRICE_RE.search(combo):
-                    candidates.append(combo)
-                    i += span + 1
-                    made = True
-                    break
-        if not made:
-            i += 1
+		made = False
+		for span in (1, 2):
+			if i + span < len(raw_lines):
+				combo = " ".join(raw_lines[i:i + span + 1])
+				if PRICE_RE.search(combo):
+					candidates.append((combo, make_source_key(combo)))
+					i += span + 1
+					made = True
+					break
+		if not made:
+			i += 1
 
-    return candidates
+	return candidates
 
 # --- форматирование цены ---
 def normalize_price(s: str) -> str:
@@ -247,96 +246,85 @@ def has_price_like(text: str) -> bool:
 	"""
 	return bool(PRICE_RE.search(text))
 
-async def _safe_parse_line(lines: list[str], index: int, sem: asyncio.Semaphore) -> dict | None:
-	"""
-	Пытаемся разобрать строку с контекстом.
-	"""
-	line = lines[index]
-	context_before = "\n".join(lines[max(0, index - 2): index])
-	context_after = "\n".join(lines[index + 1: index + 3])
+# ------------------ GPT ВЫЗОВ ------------------
 
+async def _parse_line_with_gpt(line: str, context_before: str = "", context_after: str = "") -> dict | None:
+	messages = [
+		{"role": "system", "content": SINGLE_LINE_SYSTEM_PROMPT},
+		{"role": "user", "content": f"{context_before}\n\n{line}\n\n{context_after}"}
+	]
+	try:
+		resp = await asyncio.wait_for(
+			client.chat.completions.create(
+				model=LLM_MODEL,
+				messages=messages,
+				response_format={"type": "json_object"},
+			),
+			timeout=LLM_TIMEOUT
+		)
+	except Exception:
+		return None
+
+	reply = getattr(resp.choices[0].message, "content", None)
+	if not reply:
+		return None
+	try:
+		return json.loads(reply)
+	except Exception:
+		m = re.search(r"\{.*\}", reply, re.S)
+		if not m:
+			return None
+		try:
+			return json.loads(m.group(0))
+		except Exception:
+			return None
+
+# ------------------ ГЛАВНАЯ ------------------
+
+async def _safe_parse_line(line: str, source_key: str, sem: asyncio.Semaphore) -> dict | None:
+	context_before = context_after = ""
 	for attempt in range(LLM_MAX_RETRIES):
 		async with sem:
 			parsed = await _parse_line_with_gpt(line, context_before, context_after)
 		if parsed:
+			parsed["source_key"] = source_key
 			return parsed
 		await asyncio.sleep(0.3 * (attempt + 1))
-
-	# fallback — только если есть реальная цена
-	m = PRICE_RE.search(line)
-	if not m:
-		return None  # без цены ничего не создаём
-	raw_price = m.group("price")
-	price_norm = normalize_price(raw_price)
-	name = re.sub(r'\s*[-–—:]\s*$', "", line[:m.start()].strip())
-	if len(name) < 2:
-		return None
-	return {
-		"название товара": name,
-		"категория": "",
-		"подкатегория": "",
-		"цвет": "",
-		"модель": "",
-		"характеристики": "",
-		"цена": price_norm or raw_price,
-	}
+	return None
 
 
 async def parse_full_message(text: str) -> list[dict]:
-	"""
-	1) Проверяет, содержит ли сообщение что-то похожее на цену.
-	2) Если нет — сразу пропускает (чтобы не парсить справочную информацию).
-	3) Выделяет кандидатов со строками, где есть цены.
-	4) Прогоняет каждую строку через GPT.
-	5) Нормализует и фильтрует товары.
-	"""
-	# 🔹 Пропускаем сообщения без ценоподобных выражений
 	if not has_price_like(text):
 		print("⏩ Сообщение не содержит цен — пропускаю полностью.")
 		return []
 
 	candidates = _stitch_candidates(text)
 	print(f"🔎 Кандидатов-строк: {len(candidates)}")
-
 	if not candidates:
-		print("⏩ Не найдено строк с ценами — пропускаю сообщение.")
 		return []
 
 	sem = asyncio.Semaphore(LLM_MAX_CONCURRENCY)
-	tasks = [asyncio.create_task(_safe_parse_line(candidates, i, sem)) for i in range(len(candidates))]
+	tasks = [
+		asyncio.create_task(_safe_parse_line(c[0], c[1], sem))
+		for c in candidates
+	]
 	parsed = await asyncio.gather(*tasks)
 
-	results: list[dict] = []
-	seen = set()  # защита от дублей (name+price)
-
+	results = []
+	seen = set()
 	for item in parsed:
 		if not item:
 			continue
-
-		# нормализуем цену
-		if item.get("цена"):
-			item["цена"] = normalize_price(str(item["цена"])) or str(item["цена"])
-
 		name = (item.get("название товара") or "").strip()
 		price = (item.get("цена") or "").strip()
 		if not name or not price:
 			continue
-
 		key = (name.lower(), price)
 		if key in seen:
 			continue
 		seen.add(key)
-
-		results.append({
-			"название товара": name,
-			"категория": item.get("категория", "").strip(),
-			"подкатегория": item.get("подкатегория", "").strip(),
-			"цвет": item.get("цвет", "").strip(),
-			"модель": item.get("модель", "").strip(),
-			"характеристики": item.get("характеристики", "").strip(),
-			"цена": price,
-		})
+		item["цена"] = normalize_price(price)
+		results.append(item)
 
 	print(f"✅ Всего товаров из сообщения: {len(results)}")
 	return results
-

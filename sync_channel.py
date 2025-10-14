@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import hashlib
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -34,13 +33,6 @@ def _col_letter(n: int) -> str:
 		n, r = divmod(n - 1, 26)
 		s = chr(65 + r) + s
 	return s
-
-
-def make_item_key(item: dict) -> str:
-	name = (item.get("название товара") or "").strip().lower()
-	char = (item.get("характеристики") or "").strip().lower()
-	base = f"{name}:{char}"
-	return hashlib.md5(base.encode("utf-8")).hexdigest()[:12]
 
 def similar(a: str, b: str) -> float:
 	return SequenceMatcher(None, a, b).ratio()
@@ -98,7 +90,7 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 	if not items:
 		return
 
-	# Собираем известные ключи из таблицы
+	# Существующие ключи из таблицы
 	existing_keys = set(
 		r[key_col_norm].strip()
 		for r in all_rows[1:]
@@ -110,37 +102,38 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 	batch_limit = 100
 
 	for item in items:
-		name = (item.get("название товара") or "").strip().lower()
-		if not name:
+		name = (item.get("название товара") or "").strip()
+		source_key = item.get("source_key", "").strip()
+
+		# пропуск мусора
+		if not name or len(name) < 4 or not source_key:
 			continue
 
-		item_key = make_item_key(item)
-		item["key"] = item_key
+		item["key"] = source_key  # ⬅️ теперь ключ из исходной строки
 
-		# --- Проверка по ключу ---
-		if item_key in existing_keys:
-			print(f"⏩ Уже добавлен: {item['название товара']}")
+		if source_key in existing_keys:
+			print(f"⏩ Уже добавлен: {name}")
 			continue
 
-		# --- Проверка похожих названий (на всякий случай) ---
+		# проверка похожих имён (резервная)
 		is_duplicate = False
 		for r in all_rows[1:]:
 			if len(r) > name_col_norm:
 				existing_name = r[name_col_norm].strip().lower()
-				if existing_name and similar(name, existing_name) > 0.9:
-					print(f"⚠️ Похожий товар уже есть: {name}")
+				if existing_name and similar(name.lower(), existing_name) > 0.9:
 					is_duplicate = True
+					print(f"⚠️ Похожий товар уже есть: {name}")
 					break
 		if is_duplicate:
 			continue
 
 		row_buf, c1, c2, idx = _build_row_for_headers(item, headers)
 
-		# --- Проверка существующей строки по ключу (для обновления цены) ---
+		# поиск по ключу для обновления цены
 		found_row = None
 		for i, r in enumerate(all_rows[1:], start=2):
 			if key_col_norm is not None and len(r) > key_col_norm:
-				if r[key_col_norm].strip() == item_key:
+				if r[key_col_norm].strip() == source_key:
 					found_row = i
 					break
 
@@ -154,14 +147,14 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 					update_data.extend([""] * (idx["цена"] - len(update_data) + 1))
 				update_data[idx["цена"]] = new_price
 				price_updates.append((found_row, c1, c2, update_data[c1 - 1:c2]))
-				print(f"💰 Обновлена цена: {item['название товара']} ({existing_price} → {new_price})")
+				print(f"💰 Обновлена цена: {name} ({existing_price} → {new_price})")
 			else:
-				print(f"⏩ Без изменений: {item['название товара']}")
+				print(f"⏩ Без изменений: {name}")
 		else:
 			new_rows.append(row_buf)
 			all_rows.append([""] * len(headers))
-			existing_keys.add(item_key)
-			print(f"✅ Добавлено новое: {item['название товара']}")
+			existing_keys.add(source_key)
+			print(f"✅ Добавлено новое: {name}")
 
 	# --- Пакетное добавление новых товаров ---
 	if new_rows:
