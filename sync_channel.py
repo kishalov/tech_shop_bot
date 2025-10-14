@@ -100,6 +100,11 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 	if not items:
 		return
 
+	# Буферы для пакетного обновления
+	new_rows = []       # список строк для добавления
+	price_updates = []  # список кортежей (row_index, c1, c2, data)
+	batch_limit = 100   # сколько максимум операций в одном batch_update
+
 	for item in items:
 		name = (item.get("название товара") or "").strip().lower()
 		if not name:
@@ -144,20 +149,50 @@ async def process_message(message, headers, all_rows, name_col_norm, key_col_nor
 				if len(update_data) <= idx["цена"]:
 					update_data.extend([""] * (idx["цена"] - len(update_data) + 1))
 				update_data[idx["цена"]] = new_price
-				range_str = f"{_col_letter(c1)}{found_row}:{_col_letter(c2)}{found_row}"
-				sheet.update(range_str, [update_data[c1 - 1:c2]])
+				price_updates.append((found_row, c1, c2, update_data[c1 - 1:c2]))
 				print(f"💰 Обновлена цена: {item['название товара']} ({existing_price} → {new_price})")
 			else:
 				print(f"⏩ Без изменений: {item['название товара']}")
 		else:
-			sheet.append_row(row_buf, table_range=f"{_col_letter(c1)}1:{_col_letter(c2)}1")
-			print(f"✅ Добавлено новое: {item['название товара']}")
+			new_rows.append(row_buf)
 			all_rows.append([""] * len(headers))
 			known_keys.add(item_key)
 			save_known(known_keys)
+			print(f"✅ Добавлено новое: {item['название товара']}")
 
-		await asyncio.sleep(0.3)
+	# --- Пакетное добавление новых товаров ---
+	if new_rows:
+		print(f"📦 Добавляю новые строки: {len(new_rows)} шт...")
+		try:
+			# Определяем диапазон для добавления (следующая строка после последней)
+			start_row = len(all_rows) - len(new_rows) + 1
+			range_str = f"{_col_letter(1)}{start_row}:{_col_letter(len(headers))}{start_row + len(new_rows) - 1}"
+			sheet.batch_update([{
+				"range": range_str,
+				"values": new_rows
+			}])
+			print("✅ Новые строки успешно добавлены.")
+		except Exception as e:
+			print(f"⚠️ Ошибка при добавлении строк: {e}")
 
+	# --- Пакетное обновление цен ---
+	if price_updates:
+		print(f"💰 Обновляю цены для {len(price_updates)} товаров...")
+		batch_data = []
+		for row, c1, c2, vals in price_updates:
+			range_str = f"{_col_letter(c1)}{row}:{_col_letter(c2)}{row}"
+			batch_data.append({"range": range_str, "values": [vals]})
+
+		# разбиваем на части, если слишком много обновлений
+		for i in range(0, len(batch_data), batch_limit):
+			chunk = batch_data[i:i + batch_limit]
+			try:
+				sheet.batch_update(chunk)
+				await asyncio.sleep(2)  # пауза между пакетами
+			except Exception as e:
+				print(f"⚠️ Ошибка при batch_update: {e}")
+
+	print("✅ Пакетное обновление завершено.")
 
 async def main():
 	await client.start()
