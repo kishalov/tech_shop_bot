@@ -1,41 +1,36 @@
+# bot.py
 import asyncio
 from aiogram import Bot, Dispatcher
 from config import BOT_TOKEN
-from handlers import router as base_router
-from handlers_catalog import router as catalog_router
-from sheets import get_products
+from handlers.handlers import router as base_router
+from channel_store import ensure_refreshed
+from sync_channel import client as telethon_client   # ← добавили
 
+REFRESH_INTERVAL = 3600
 
-REFRESH_INTERVAL = 3600  # каждые 60 минут
-
-
-async def refresh_catalog_job():
-	"""
-	Фоновая задача: периодически обновляет кэш каталога из Google Sheets.
-	"""
+async def refresh_channel_job():
 	while True:
 		try:
-			get_products(ttl=0)  # сбрасываем кэш и перезагружаем товары
-			print("🔄 Каталог обновлён из таблицы.")
+			ensure_refreshed(force=True)
+			print("🔄 Канал синхронизирован.")
 		except Exception as e:
-			print(f"⚠️ Ошибка при обновлении каталога: {e}")
+			print(f"⚠ Ошибка синхронизации: {e}")
 		await asyncio.sleep(REFRESH_INTERVAL)
 
-
 async def main():
+	# ←←← ВАЖНО: запускаем Telethon перед ботом
+	await telethon_client.start()
+	print("⚡ Telethon подключён")
+
 	bot = Bot(token=BOT_TOKEN)
 	dp = Dispatcher()
 
-	# подключаем роутеры
 	dp.include_router(base_router)
-	dp.include_router(catalog_router)
 
-	# запускаем фоновое обновление
-	asyncio.create_task(refresh_catalog_job())
+	asyncio.create_task(refresh_channel_job())
 
-	print("🤖 Бот запущен и ждёт обновлений каталога.")
+	print("🤖 Бот запущен.")
 	await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
 	asyncio.run(main())

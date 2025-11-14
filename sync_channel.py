@@ -1,225 +1,189 @@
 import os
-import json
+import re
 import asyncio
-from difflib import SequenceMatcher
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from parser_ai import parse_full_message
-import gspread
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from dataclasses import dataclass
+from typing import Optional, List, Dict
 
 load_dotenv()
 
-# --- Настройки из .env ---
 api_id = int(os.getenv("TELEGRAM_API_ID"))
 api_hash = os.getenv("TELEGRAM_API_HASH")
 source_channel = os.getenv("SOURCE_CHANNEL")
-google_creds = "/configs/creds.json"
 
-CACHE_FILE = "known_items.json"
+client = TelegramClient("sync_session", api_id, api_hash)
 
-# --- Google Sheets ---
-gc = gspread.service_account(filename=google_creds)
-sheet = gc.open("Catalog").sheet1
-
-# --- Подключаемся к Telegram ---
-client = TelegramClient("parser_session", api_id, api_hash)
-
-
-# ---------- УТИЛИТЫ ----------
-
-def _col_letter(n: int) -> str:
-	s = ""
-	while n > 0:
-		n, r = divmod(n - 1, 26)
-		s = chr(65 + r) + s
-	return s
-
-def similar(a: str, b: str) -> float:
-	return SequenceMatcher(None, a, b).ratio()
+# ---------------------------
+#   Модель поста
+# ---------------------------
+@dataclass
+class ChannelPost:
+    id: int
+    text: str
+    has_media: bool = False
+    media_file_id: Optional[str] = None
 
 
-def load_known() -> set[str]:
-	if os.path.exists(CACHE_FILE):
-		with open(CACHE_FILE, "r", encoding="utf-8") as f:
-			try:
-				return set(json.load(f))
-			except Exception:
-				return set()
-	return set()
+URL_RE = re.compile(r"/(\d+)$")
 
 
-def save_known(known: set[str]):
-	with open(CACHE_FILE, "w", encoding="utf-8") as f:
-		json.dump(list(known), f, ensure_ascii=False, indent=2)
+def extract_id(url: str) -> Optional[int]:
+    m = URL_RE.search(url)
+    return int(m.group(1)) if m else None
 
 
-# ---------- СТРОКА ДЛЯ ДОБАВЛЕНИЯ ----------
+# ===================================================
+#   Чтение кнопок из меню-сообщения
+# ===================================================
+async def fetch_menu_buttons(menu_message_id: int) -> list[dict]:
+    msg = await client.get_messages(source_channel, ids=menu_message_id)
+    if not msg or not msg.reply_markup:
+        return []
 
-def _build_row_for_headers(item: dict, headers: list[str]):
-	norm_headers = [h.strip().lower() for h in headers]
-	fields = ["название товара", "категория", "характеристики", "цена", "key"]
-	idx = {f: (norm_headers.index(f) if f in norm_headers else None) for f in fields}
+    buttons = []
 
-	if idx["название товара"] is None:
-		raise RuntimeError("В таблице нет столбца 'Название товара'")
+    for row in msg.reply_markup.rows:
+        for btn in row.buttons:
+            if not getattr(btn, "url", None):
+                continue
 
-	existing = [i for i in idx.values() if i is not None]
-	first, last = min(existing), max(existing)
-	row_buf = [""] * (last - first + 1)
+            mid = extract_id(btn.url)
+            if not mid:
+                continue
 
-	def put(key: str, value: str):
-		i = idx.get(key)
-		if i is not None:
-			row_buf[i - first] = (value or "").strip()
+            buttons.append({
+                "text": btn.text,
+                "message_id": mid
+            })
 
-	for key in fields:
-		put(key, item.get(key))
-
-	return row_buf, first + 1, last + 1, idx
-
-
-# ---------- ГЛАВНАЯ ЛОГИКА ----------
-
-async def process_message(message, headers, all_rows, name_col_norm, key_col_norm):
-	text = message.message
-	if not text or len(text) < 20:
-		return
-
-	print(f"📩 Обрабатываю сообщение {message.id}...")
-	items = await parse_full_message(text)
-	if not items:
-		return
-
-	# Существующие ключи из таблицы
-	existing_keys = set(
-		r[key_col_norm].strip()
-		for r in all_rows[1:]
-		if len(r) > key_col_norm and r[key_col_norm].strip()
-	)
-
-	new_rows = []
-	price_updates = []
-	batch_limit = 100
-
-	for item in items:
-		name = (item.get("название товара") or "").strip()
-		source_key = item.get("source_key", "").strip()
-
-		# пропуск мусора
-		if not name or len(name) < 4 or not source_key:
-			continue
-
-		item["key"] = source_key  # ⬅️ теперь ключ из исходной строки
-
-		if source_key in existing_keys:
-			print(f"⏩ Уже добавлен: {name}")
-			continue
-
-		# проверка похожих имён (резервная)
-		is_duplicate = False
-		for r in all_rows[1:]:
-			if len(r) > name_col_norm:
-				existing_name = r[name_col_norm].strip().lower()
-				if existing_name and similar(name.lower(), existing_name) > 0.9:
-					is_duplicate = True
-					print(f"⚠️ Похожий товар уже есть: {name}")
-					break
-		if is_duplicate:
-			continue
-
-		row_buf, c1, c2, idx = _build_row_for_headers(item, headers)
-
-		# поиск по ключу для обновления цены
-		found_row = None
-		for i, r in enumerate(all_rows[1:], start=2):
-			if key_col_norm is not None and len(r) > key_col_norm:
-				if r[key_col_norm].strip() == source_key:
-					found_row = i
-					break
-
-		if found_row:
-			existing_row = all_rows[found_row - 1]
-			existing_price = existing_row[idx["цена"]] if len(existing_row) > idx["цена"] else ""
-			new_price = (item.get("цена") or "").strip()
-			if new_price and new_price != existing_price:
-				update_data = existing_row[:]
-				if len(update_data) <= idx["цена"]:
-					update_data.extend([""] * (idx["цена"] - len(update_data) + 1))
-				update_data[idx["цена"]] = new_price
-				price_updates.append((found_row, c1, c2, update_data[c1 - 1:c2]))
-				print(f"💰 Обновлена цена: {name} ({existing_price} → {new_price})")
-			else:
-				print(f"⏩ Без изменений: {name}")
-		else:
-			new_rows.append(row_buf)
-			all_rows.append([""] * len(headers))
-			existing_keys.add(source_key)
-			print(f"✅ Добавлено новое: {name}")
-
-	# --- Пакетное добавление новых товаров ---
-	if new_rows:
-		print(f"📦 Добавляю новые строки: {len(new_rows)} шт...")
-		try:
-			start_row = len(all_rows) - len(new_rows) + 1
-			range_str = f"{_col_letter(1)}{start_row}:{_col_letter(len(headers))}{start_row + len(new_rows) - 1}"
-			sheet.batch_update([{"range": range_str, "values": new_rows}])
-			print("✅ Новые строки успешно добавлены.")
-		except Exception as e:
-			print(f"⚠️ Ошибка при добавлении строк: {e}")
-
-	# --- Пакетное обновление цен ---
-	if price_updates:
-		print(f"💰 Обновляю цены для {len(price_updates)} товаров...")
-		batch_data = []
-		for row, c1, c2, vals in price_updates:
-			range_str = f"{_col_letter(c1)}{row}:{_col_letter(c2)}{row}"
-			batch_data.append({"range": range_str, "values": [vals]})
-
-		for i in range(0, len(batch_data), batch_limit):
-			chunk = batch_data[i:i + batch_limit]
-			try:
-				sheet.batch_update(chunk)
-				await asyncio.sleep(2)
-			except Exception as e:
-				print(f"⚠️ Ошибка при batch_update: {e}")
-
-	print("✅ Пакетное обновление завершено.")
-
-async def main():
-	await client.start()
-	print(f"🔍 Читаю посты из канала @{source_channel}...")
-
-	headers = sheet.row_values(1)
-
-	# --- Добавляем столбец 'key' при необходимости ---
-	if "key" not in [h.strip().lower() for h in headers]:
-		sheet.add_cols(1)
-		sheet.update_cell(1, len(headers) + 1, "key")
-		headers.append("key")
-		print("🆕 Добавлен столбец 'key' в таблицу.")
-
-	all_rows = sheet.get_all_values()
-	norm_headers = [h.strip().lower() for h in headers]
-	name_col_norm = norm_headers.index("название товара")
-	key_col_norm = norm_headers.index("key")
-
-	print(f"📚 Загружено строк из таблицы: {len(all_rows) - 1}")
-
-	async for message in client.iter_messages(source_channel, limit=None, reverse=True):
-		await process_message(message, headers, all_rows, name_col_norm, key_col_norm)
-
-	print("✅ Парсинг завершён. Все данные добавлены в таблицу.")
-
-async def weekly_job():
-	while True:
-		print("🕓 Запускаю еженедельный прогон...")
-		try:
-			await main()
-		except Exception as e:
-			print(f"⚠️ Ошибка во время прогона: {e}")
-		print("💤 Ожидание 7 дней до следующего прогона...")
-		await asyncio.sleep(7 * 24 * 60 * 60)
+    return buttons
 
 
-if __name__ == "__main__":
-	asyncio.run(weekly_job())
+# ===================================================
+#   Загрузка одного сообщения
+# ===================================================
+async def fetch_post(mid: int) -> Optional[ChannelPost]:
+    msg = await client.get_messages(source_channel, ids=mid)
+    if not msg:
+        return None
+
+    text = msg.message or ""
+    has_media = False
+    media = None
+
+    if isinstance(msg.media, MessageMediaPhoto):
+        has_media = True
+        media = msg.photo
+
+    elif isinstance(msg.media, MessageMediaDocument):
+        has_media = True
+        media = msg.document
+
+    return ChannelPost(
+        id=mid,
+        text=text,
+        has_media=has_media,
+        media_file_id=media
+    )
+
+
+# ===================================================
+#   Построение цепочек “продолжение“
+# ===================================================
+async def build_chains(base_ids: list[int]) -> (list[ChannelPost], dict):
+    """
+    Строим цепочки не по ID, а по времени создания сообщения.
+    """
+    # Загружаем ВСЕ сообщения канала за последние N (например, 3000)
+    all_msgs = []
+    async for msg in client.iter_messages(source_channel, limit=3000):
+        if msg.message:
+            all_msgs.append(msg)
+
+    # Сортировка по дате (самое старое → самое новое)
+    all_msgs.sort(key=lambda m: m.date)
+
+    # Словарь для быстрого поиска: (id → объект)
+    post_map: dict[int, ChannelPost] = {}
+
+    for m in all_msgs:
+        media = None
+        has_media = False
+
+        if isinstance(m.media, MessageMediaPhoto):
+            has_media = True
+            media = m.photo
+        elif isinstance(m.media, MessageMediaDocument):
+            has_media = True
+            media = m.document
+
+        post_map[m.id] = ChannelPost(
+            id=m.id,
+            text=m.message or "",
+            has_media=has_media,
+            media_file_id=media
+        )
+
+    # Теперь строим цепочки
+    chains: dict[int, list[int]] = {}
+
+    # Подготовим список только ID (в порядке времени)
+    ordered_ids = [m.id for m in all_msgs]
+
+    for base in base_ids:
+        if base not in post_map:
+            continue
+
+        chain = [base]
+        current = base
+
+        while True:
+            # текущий пост
+            cur_post = post_map[current]
+            text = (cur_post.text or "").lower()
+
+            # если нет "продолжение" — конец
+            if "продолжение" not in text:
+                break
+
+            # находим индекс в хронологии
+            idx = ordered_ids.index(current)
+
+            # если этот пост был последним — выхода нет
+            if idx == len(ordered_ids) - 1:
+                break
+
+            # следующий по времени
+            nxt = ordered_ids[idx + 1]
+            chain.append(nxt)
+            current = nxt
+
+        chains[base] = chain
+
+    # возвращаем все посты и цепочки
+    return list(post_map.values()), chains
+
+# ===================================================
+#   Главная функция синхронизации
+# ===================================================
+async def sync_channel(menu_message_id: int):
+    print("🔍 Синхронизирую канал…")
+
+    buttons = await fetch_menu_buttons(menu_message_id)
+
+    if not buttons:
+        print("⚠ Не удалось получить кнопки.")
+        return [], []
+
+    base_ids = [b["message_id"] for b in buttons]
+    base_ids = list(set(base_ids))
+
+    # загружаем все цепочки
+    posts, chains = await build_chains(base_ids)
+
+    print("🔎 Полностью загружены посты:", list(chains.keys()))
+    print(f"📨 Получено сообщений: {len(posts)}")
+
+    return posts, buttons, chains
